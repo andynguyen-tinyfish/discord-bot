@@ -1,0 +1,28 @@
+2026-04-18 21:28:52,835 INFO __main__ - Database initialized at ./app.db
+2026-04-18 21:28:52,836 INFO __main__ - Starting application in nightly mode
+2026-04-18 21:28:52,836 INFO __main__ - Using custom target date: 2026-04-18
+2026-04-18 21:28:52,836 WARNING discord.client - PyNaCl is not installed, voice will NOT be supported
+2026-04-18 21:28:52,836 WARNING discord.client - davey is not installed, voice will NOT be supported
+2026-04-18 21:28:52,837 INFO discord.client - logging in using static token
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 197, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/Users/andynguyen/Documents/New project/app/main.py", line 158, in <module>
+    main()
+  File "/Users/andynguyen/Documents/New project/app/main.py", line 86, in main
+    client.run(config.discord_bot_token, log_handler=None)
+  File "/Users/andynguyen/Documents/New project/.venv/lib/python3.9/site-packages/discord/client.py", line 933, in run
+    asyncio.run(runner())
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/asyncio/base_events.py", line 642, in run_until_complete
+    return future.result()
+  File "/Users/andynguyen/Documents/New project/.venv/lib/python3.9/site-packages/discord/client.py", line 922, in runner
+    await self.start(token, reconnect=reconnect)
+  File "/Users/andynguyen/Documents/New project/.venv/lib/python3.9/site-packages/discord/client.py", line 851, in start
+    await self.connect(reconnect=reconnect)
+  File "/Users/andynguyen/Documents/New project/.venv/lib/python3.9/site-packages/discord/client.py", line 775, in connect
+    raise PrivilegedIntentsRequired(exc.shard_id) from None
+discord.errors.PrivilegedIntentsRequired: Shard ID None is requesting privileged intents that have not been explicitly enabled in the developer portal. It is recommended to go to https://discord.com/developers/applications/ and explicitly enable the privileged intents within your application's page. If this is not possible, then consider disabling the privileged intents instead.

@@ -1,0 +1,11 @@
+2026-04-18 21:46:10,269 INFO __main__ - Database initialized at ./app.db
+2026-04-18 21:46:10,269 INFO __main__ - Starting application in nightly mode
+2026-04-18 21:46:10,269 WARNING discord.client - PyNaCl is not installed, voice will NOT be supported
+2026-04-18 21:46:10,269 WARNING discord.client - davey is not installed, voice will NOT be supported
+2026-04-18 21:46:10,270 INFO discord.client - logging in using static token
+2026-04-18 21:46:12,114 INFO discord.gateway - Shard ID None has connected to Gateway (Session ID: 1793ef36d0f758363259d50bfb27e62b).
+2026-04-18 21:46:14,126 INFO __main__ - Discord client connected as TinyFish Annotation Bot#2971
+2026-04-18 21:46:14,132 INFO app.scheduler - Nightly job started for 2026-04-17
+2026-04-18 21:46:14,561 INFO app.scheduler - Collected 12 messages from 1 source channels for 2026-04-17
+2026-04-18 21:46:14,562 INFO app.scheduler - Kept 12 messages after filtering
+2026-04-18 21:46:15,256 INFO app.scheduler - Saved summary for 2026-04-17

@@ -1,0 +1,7 @@
+2026-04-19 17:00:34,332 INFO __main__ - Database initialized at ./app.db
+2026-04-19 17:00:34,332 INFO __main__ - Starting application in ingest-knowledge mode
+2026-04-19 17:00:34,332 WARNING discord.client - PyNaCl is not installed, voice will NOT be supported
+2026-04-19 17:00:34,332 WARNING discord.client - davey is not installed, voice will NOT be supported
+2026-04-19 17:00:34,332 INFO discord.client - logging in using static token
+2026-04-19 17:00:36,975 INFO discord.gateway - Shard ID None has connected to Gateway (Session ID: cf4a8d4c8908d618ffb09fd940190250).
+2026-04-19 17:00:38,985 INFO __main__ - Discord client connected as TinyFish Annotation Bot#2971

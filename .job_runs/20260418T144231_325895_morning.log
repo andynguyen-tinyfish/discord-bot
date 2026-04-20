@@ -1,0 +1,9 @@
+2026-04-18 21:42:31,589 INFO __main__ - Database initialized at ./app.db
+2026-04-18 21:42:31,589 INFO __main__ - Starting application in morning mode
+2026-04-18 21:42:31,590 WARNING discord.client - PyNaCl is not installed, voice will NOT be supported
+2026-04-18 21:42:31,590 WARNING discord.client - davey is not installed, voice will NOT be supported
+2026-04-18 21:42:31,590 INFO discord.client - logging in using static token
+2026-04-18 21:42:33,625 INFO discord.gateway - Shard ID None has connected to Gateway (Session ID: 2162c60a247e28668ce585585b55aa8e).
+2026-04-18 21:42:35,663 INFO __main__ - Discord client connected as TinyFish Annotation Bot#2971
+2026-04-18 21:42:35,667 INFO app.scheduler - Morning job started for 2026-04-17
+2026-04-18 21:42:35,668 WARNING app.scheduler - No summary found for 2026-04-17; skipping morning post
