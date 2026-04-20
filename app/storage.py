@@ -138,7 +138,7 @@ def init_db(database_path: str | None = None, seed_settings: RuntimeSettings | N
             column_name="shared_knowledge_file_paths",
             definition="TEXT NOT NULL DEFAULT '[]'",
         )
-        connection.execute(
+        runtime_settings_insert = connection.execute(
             """
             INSERT OR IGNORE INTO runtime_settings (
                 id,
@@ -210,8 +210,9 @@ def init_db(database_path: str | None = None, seed_settings: RuntimeSettings | N
             "CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source ON knowledge_chunks(source_type, source_ref)"
         )
         connection.commit()
+        runtime_settings_created = runtime_settings_insert.rowcount == 1
 
-    if seed_settings is not None and _should_seed_runtime_settings(db_path):
+    if seed_settings is not None and runtime_settings_created:
         save_runtime_settings(seed_settings, db_path)
 
 
@@ -1029,13 +1030,6 @@ def _to_optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
-
-
-def _should_seed_runtime_settings(database_path: str) -> bool:
-    """Return True when runtime settings still have default bootstrap values."""
-
-    current = get_runtime_settings(database_path)
-    return current.source_channel_ids == [] and current.reminder_channel_id == 0
 
 
 def _utc_now_iso() -> str:
