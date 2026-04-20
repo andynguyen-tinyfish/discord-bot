@@ -8,7 +8,10 @@ and wires the scheduler into the bot lifecycle.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
+import os
+import threading
 from datetime import date, datetime
 
 import discord
@@ -102,9 +105,14 @@ def main() -> None:
 
     LOGGER.info("Database initialized at %s", config.database_path)
     LOGGER.info("Starting application in %s mode", args.mode)
+
+    if args.mode == "all":
+        _run_combined_mode(config=config, host=args.host, port=_resolve_web_port(args.port))
+        return
+
     if args.mode == "admin":
         app = create_admin_app(config)
-        app.run(host=args.host, port=args.port)
+        app.run(host=args.host, port=_resolve_web_port(args.port))
         return
 
     target_date = _parse_target_date(args.date)
@@ -128,9 +136,9 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Discord QA reminder bot")
     parser.add_argument(
         "--mode",
-        choices=("serve", "nightly", "morning", "admin", "ingest-knowledge"),
+        choices=("serve", "nightly", "morning", "admin", "all", "ingest-knowledge"),
         default="serve",
-        help="Run scheduler, one-off jobs, or internal admin dashboard.",
+        help="Run scheduler, one-off jobs, internal admin dashboard, or combined mode.",
     )
     parser.add_argument(
         "--date",
@@ -139,13 +147,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Admin dashboard host (used only with --mode admin).",
+        help="Admin dashboard host (used with --mode admin or --mode all).",
     )
     parser.add_argument(
         "--port",
-        default=8080,
+        default=None,
         type=int,
-        help="Admin dashboard port (used only with --mode admin).",
+        help="Admin dashboard port (used with --mode admin or --mode all). Defaults to $PORT or 8080.",
     )
     parser.add_argument(
         "--project-key",
@@ -197,6 +205,48 @@ def _build_seed_runtime_settings(config: Config) -> RuntimeSettings:
         shared_knowledge_file_paths=[],
         project_configs=[],
     )
+
+
+def _resolve_web_port(port_arg: int | None) -> int:
+    """Resolve web port from CLI arg, then $PORT, then default 8080."""
+
+    if port_arg is not None:
+        return port_arg
+    env_port = os.getenv("PORT", "").strip()
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError as exc:
+            raise ValueError(f"Invalid PORT value: {env_port!r}. Must be an integer.") from exc
+    return 8080
+
+
+def _run_combined_mode(config: Config, host: str, port: int) -> None:
+    """Run bot worker + scheduler with admin dashboard in one process."""
+
+    client = ReminderBot(config=config, mode="serve")
+    app = create_admin_app(config)
+    bot_started = threading.Event()
+
+    def _run_bot() -> None:
+        bot_started.set()
+        client.run(config.discord_bot_token, log_handler=None)
+
+    bot_thread = threading.Thread(target=_run_bot, name="discord-bot", daemon=True)
+    bot_thread.start()
+    bot_started.wait(timeout=2.0)
+    LOGGER.info("Combined mode: bot worker started in background thread.")
+    LOGGER.info("Combined mode: starting admin server on %s:%s", host, port)
+
+    try:
+        app.run(host=host, port=port)
+    finally:
+        try:
+            if getattr(client, "loop", None) and client.loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(client.close(), client.loop)
+                future.result(timeout=5)
+        except Exception:
+            LOGGER.exception("Combined mode shutdown: failed to close Discord client cleanly")
 
 
 if __name__ == "__main__":

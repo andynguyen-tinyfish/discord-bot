@@ -91,9 +91,14 @@ Optional env vars such as `SOURCE_CHANNEL_IDS`, schedule values, and whitelist v
 
 ## Run Locally
 
-Continuous scheduler mode:
+Continuous scheduler mode (bot + scheduler only):
 ```bash
 python -m app.main --mode serve
+```
+
+Combined mode (bot/scheduler + admin dashboard in one process):
+```bash
+python -m app.main --mode all --host 0.0.0.0 --port 8080
 ```
 
 One-off jobs:

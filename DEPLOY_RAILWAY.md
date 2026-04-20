@@ -1,77 +1,58 @@
-# Deploy to Railway
+# Deploy to Railway (Single Service)
 
-## 1) Required environment variables
+## Required environment variables
 Set these in Railway service Variables:
 
 - `DISCORD_BOT_TOKEN` (required)
 - `GEMINI_API_KEY` (required)
 - `DATABASE_PATH` (required)
-- `ADMIN_PASSWORD` or `ADMIN_AUTH_SECRET` (required by app startup)
-
-Recommended for Railway with persistent volume:
-
-- `DATABASE_PATH=/data/app.db`
+- `ADMIN_PASSWORD` or `ADMIN_AUTH_SECRET` (required)
 
 Optional:
 
-- `ADMIN_SESSION_SECRET` (recommended if you run admin service)
+- `ADMIN_SESSION_SECRET` (recommended)
 
-## 2) Do you need a Railway Volume?
-Yes, if you want SQLite data to persist across deploy/restarts.
+## Volume / persistence
+Yes, use one Railway Volume so bot + admin share the same SQLite file.
 
-Mount a Volume at `/data` and set:
+Recommended:
 
+- mount path: `/data`
 - `DATABASE_PATH=/data/app.db`
 
 Notes:
 
-- Ingested knowledge chunks are stored in SQLite, so DB persistence is the key requirement.
-- Local source docs (if you ingest from file paths) must exist inside the running container/volume path.
+- Summaries, runtime settings, job logs, and ingested knowledge chunks are stored in this SQLite database.
+- If you ingest from local files, those files must exist inside the deployed service/container path.
 
-## 3) Start command
-Default worker start command (bot + scheduler):
-
-```bash
-python -m app.main --mode serve
-```
-
-Admin dashboard start command (optional separate service):
+## Start command (single service)
+Use the new combined mode:
 
 ```bash
-python -m app.main --mode admin --host 0.0.0.0 --port $PORT
+python -m app.main --mode all --host 0.0.0.0 --port $PORT
 ```
 
-## 4) Healthcheck path
-- Admin service healthcheck path: `/health`
-- Worker-only bot service has no HTTP listener, so no HTTP healthcheck is required there.
+This runs:
 
-## 5) Recommended Railway topology
-Smallest safe option:
+- Discord bot worker + scheduler in background thread
+- Admin dashboard web server in foreground
 
-1. **One service for bot worker only** (`--mode serve`)
+## Healthcheck
+Set Railway HTTP healthcheck path to:
 
-If you also need dashboard in Railway:
+- `/health`
 
-1. Bot worker service: `python -m app.main --mode serve`
-2. Admin web service: `python -m app.main --mode admin --host 0.0.0.0 --port $PORT`
-
-Both services should point to the same persistent `DATABASE_PATH` if they need shared state.
-
-## 6) GitHub -> Railway deploy steps
+## GitHub -> Railway deploy steps
 1. Push this repo to GitHub.
-2. In Railway, click **New Project** -> **Deploy from GitHub repo**.
+2. In Railway: **New Project** -> **Deploy from GitHub repo**.
 3. Select this repository.
-4. For bot worker service:
-   - Use start command `python -m app.main --mode serve` (or keep `railway.toml` default).
-   - Add Variables listed above.
-   - Add Volume and mount at `/data`.
-   - Set `DATABASE_PATH=/data/app.db`.
-5. (Optional) Create a second Railway service from the same repo for admin:
-   - Start command: `python -m app.main --mode admin --host 0.0.0.0 --port $PORT`
-   - Same Variables/Volume/`DATABASE_PATH`.
-   - Configure healthcheck path to `/health`.
-6. Deploy.
-7. Verify:
-   - Worker logs show Discord connected and scheduler started.
-   - Admin service `/health` returns `ok` (if deployed).
-   - DB file exists in mounted volume path.
+4. Add one Volume mounted at `/data`.
+5. Set variables listed above, including `DATABASE_PATH=/data/app.db`.
+6. Set start command to:
+   - `python -m app.main --mode all --host 0.0.0.0 --port $PORT`
+7. Set healthcheck path to `/health`.
+8. Deploy.
+9. Verify:
+   - logs show bot connected and scheduler running
+   - `/health` returns `ok`
+   - dashboard opens at `/admin`
