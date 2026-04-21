@@ -16,25 +16,32 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Flask, flash, redirect, render_template_string, request, session, url_for
+from werkzeug.utils import secure_filename
 
 from app.config import Config
 from app.storage import (
     ProjectConfig,
     RuntimeSettings,
+    add_uploaded_knowledge_file,
     clear_operational_data,
+    delete_knowledge_source_chunks,
     delete_job_logs,
     delete_summaries,
     get_recent_job_logs,
     get_recent_summaries,
     get_runtime_settings,
     get_summary,
+    get_uploaded_knowledge_file,
+    list_uploaded_knowledge_files,
     log_job_event,
     save_runtime_settings,
+    set_uploaded_knowledge_file_active,
 )
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 JOB_RUN_LOG_DIR = ROOT_DIR / ".job_runs"
+ALLOWED_KNOWLEDGE_EXTENSIONS = {".md", ".txt", ".pdf"}
 
 
 BASE_TEMPLATE = """
@@ -281,6 +288,24 @@ BASE_TEMPLATE = """
       }
 
       .btn-primary:hover { background: var(--terracotta-soft); }
+      .btn-secondary {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 9px 14px;
+        background: #fff;
+        color: var(--text);
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .btn-danger {
+        border: 1px solid #d7b6ac;
+        border-radius: 12px;
+        padding: 8px 12px;
+        background: #fff0ec;
+        color: #8a3a24;
+        cursor: pointer;
+        font-weight: 600;
+      }
 
       .row {
         display: flex;
@@ -398,6 +423,11 @@ BASE_TEMPLATE = """
       }
 
       .list li { margin-bottom: 6px; }
+      .mono {
+        font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 0.8rem;
+        color: var(--text-secondary);
+      }
 
       @media (max-width: 760px) {
         .shell { padding-top: 12px; }
@@ -611,17 +641,81 @@ ACTIONS_CONTENT_TEMPLATE = """
 </section>
 
 <section class="card">
-  <h2 class="section-title">Knowledge Ingestion</h2>
-  <p class="section-note">Refresh project knowledge chunks from configured channels/files.</p>
+  <h2 class="section-title">Project Knowledge Manager</h2>
+  <p class="section-note">Upload project files from browser, then ingest using existing knowledge pipeline.</p>
   <div class="action-card">
-    <h3>Run Knowledge Ingestion</h3>
-    <p>Leave project key empty to ingest all configured projects.</p>
-    <form method="post" action="{{ url_for('ingest_knowledge') }}">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <label>Project Key (optional)</label>
-      <input name="project_key" placeholder="project-a">
-      <div style="margin-top:10px;"><button class="btn-primary" type="submit">Start Knowledge Ingestion</button></div>
+    <h3>Project Selection</h3>
+    <form method="get" action="{{ url_for('manual_actions') }}">
+      <label>Project</label>
+      <select name="project_key" style="width:100%; border:1px solid var(--border); border-radius:10px; padding:8px 10px; background:#fff;">
+        {% for item in project_options %}
+        <option value="{{ item.key }}" {% if item.key == selected_project_key %}selected{% endif %}>{{ item.name }} ({{ item.key }})</option>
+        {% endfor %}
+      </select>
+      <div style="margin-top:10px;"><button class="btn-secondary" type="submit">Load Project Files</button></div>
     </form>
+  </div>
+  <div class="action-card" style="margin-top:10px;">
+    <h3>Upload Files</h3>
+    <p>Supported: .md, .txt, .pdf</p>
+    <form method="post" action="{{ url_for('upload_knowledge_files') }}" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="project_key" value="{{ selected_project_key }}">
+      <label>Files</label>
+      <input type="file" name="knowledge_files" multiple required>
+      <div style="margin-top:10px;" class="row">
+        <button class="btn-secondary" type="submit" name="post_upload_action" value="upload_only">Upload Only</button>
+        <button class="btn-primary" type="submit" name="post_upload_action" value="upload_and_ingest">Upload + Ingest</button>
+      </div>
+    </form>
+  </div>
+  <div class="action-card" style="margin-top:10px;">
+    <h3>Ingestion Actions</h3>
+    <p>Run ingestion for selected project sources (channels + JSON paths + dashboard-uploaded files).</p>
+    <form method="post" action="{{ url_for('reingest_project_knowledge') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="project_key" value="{{ selected_project_key }}">
+      <button class="btn-primary" type="submit">Re-ingest All Project Knowledge</button>
+    </form>
+  </div>
+  <div style="margin-top:12px;">
+    <table>
+      <thead>
+        <tr>
+          <th>File</th>
+          <th>Type</th>
+          <th>Size</th>
+          <th>Uploaded</th>
+          <th>Status</th>
+          <th>Path</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for file in uploaded_files %}
+        <tr>
+          <td>{{ file.original_filename }}</td>
+          <td>{{ file.file_type or '-' }}</td>
+          <td>{{ file.file_size_label }}</td>
+          <td>{{ file.uploaded_at }}</td>
+          <td><span class="badge badge-{{ file.badge_class }}">{{ file.ingest_status }}</span></td>
+          <td class="mono">{{ file.stored_path }}</td>
+          <td class="row-action">
+            <form method="post" action="{{ url_for('detach_knowledge_file') }}" onsubmit="return confirm('Detach this file from project and remove its chunks?');">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="file_id" value="{{ file.id }}">
+              <input type="hidden" name="project_key" value="{{ selected_project_key }}">
+              <button class="btn-danger" type="submit">Detach</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="7">No uploaded files for this project.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 </section>
 
@@ -944,10 +1038,28 @@ def create_admin_app(config: Config) -> Flask:
     @app.get("/admin/actions")
     @_require_auth
     def manual_actions() -> str:
+        settings = _safe_get_runtime_settings(config.database_path)
+        project_options = _resolve_projects_for_dashboard(settings)
+        selected_project_key = request.args.get("project_key", "").strip()
+        if not selected_project_key and project_options:
+            selected_project_key = project_options[0].key
+        if selected_project_key and all(project.key != selected_project_key for project in project_options):
+            selected_project_key = project_options[0].key if project_options else ""
+        uploaded_files = _format_uploaded_rows_for_display(
+            list_uploaded_knowledge_files(
+                project_key=selected_project_key or None,
+                only_active=True,
+                database_path=config.database_path,
+            )
+        )
         return _render_page(
             page_title="Manual Actions",
             active_nav="actions",
             body_template=ACTIONS_CONTENT_TEMPLATE,
+            settings=settings,
+            project_options=project_options,
+            selected_project_key=selected_project_key,
+            uploaded_files=uploaded_files,
         )
 
     @app.get("/admin/summaries/<summary_date>/<project_key>")
@@ -1029,6 +1141,117 @@ def create_admin_app(config: Config) -> Flask:
         except Exception as exc:
             flash(str(exc), "error")
         return redirect(url_for("manual_actions"))
+
+    @app.post("/admin/knowledge/upload")
+    @_require_auth
+    @_require_csrf
+    def upload_knowledge_files() -> Any:
+        project_key = request.form.get("project_key", "").strip()
+        if not project_key:
+            flash("Project key is required.", "error")
+            return redirect(url_for("manual_actions"))
+
+        settings = _safe_get_runtime_settings(config.database_path)
+        projects = _resolve_projects_for_dashboard(settings)
+        selected_project = next((row for row in projects if row.key == project_key), None)
+        if selected_project is None:
+            flash("Selected project is not configured.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        upload_dir = Path(config.knowledge_upload_dir).expanduser() / project_key
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        uploaded_files = request.files.getlist("knowledge_files")
+        if not uploaded_files:
+            flash("Please choose at least one file.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        uploaded_count = 0
+        for uploaded in uploaded_files:
+            original_name = str(uploaded.filename or "").strip()
+            if not original_name:
+                continue
+            extension = Path(original_name).suffix.lower()
+            if extension not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+                flash(f"Skipped {original_name}: unsupported type {extension or '(none)'}", "error")
+                continue
+            sanitized = secure_filename(Path(original_name).name)
+            if not sanitized:
+                sanitized = f"knowledge_{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}{extension}"
+            stored_name = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}_{secrets.token_hex(4)}_{sanitized}"
+            stored_path = upload_dir / stored_name
+            uploaded.save(stored_path)
+            file_size = stored_path.stat().st_size if stored_path.exists() else 0
+            add_uploaded_knowledge_file(
+                project_key=project_key,
+                original_filename=original_name,
+                stored_path=str(stored_path),
+                file_type=extension.lstrip("."),
+                file_size_bytes=file_size,
+                uploaded_by="admin",
+                database_path=config.database_path,
+            )
+            uploaded_count += 1
+
+        if uploaded_count == 0:
+            flash("No files uploaded. Check file types and input.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        post_upload_action = request.form.get("post_upload_action", "upload_only").strip()
+        if post_upload_action == "upload_and_ingest":
+            try:
+                _spawn_manual_job(mode="ingest-knowledge", date_input="", project_key=project_key)
+                flash(
+                    f"Uploaded {uploaded_count} file(s). Ingestion started for project {project_key}.",
+                    "success",
+                )
+            except Exception as exc:
+                flash(f"Uploaded {uploaded_count} file(s), but ingestion start failed: {exc}", "error")
+        else:
+            flash(f"Uploaded {uploaded_count} file(s) to project {project_key}.", "success")
+        return redirect(url_for("manual_actions", project_key=project_key))
+
+    @app.post("/admin/knowledge/reingest-project")
+    @_require_auth
+    @_require_csrf
+    def reingest_project_knowledge() -> Any:
+        project_key = request.form.get("project_key", "").strip()
+        try:
+            _spawn_manual_job(mode="ingest-knowledge", date_input="", project_key=project_key or None)
+            flash("Project knowledge ingestion started.", "success")
+        except Exception as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("manual_actions", project_key=project_key))
+
+    @app.post("/admin/knowledge/detach")
+    @_require_auth
+    @_require_csrf
+    def detach_knowledge_file() -> Any:
+        project_key = request.form.get("project_key", "").strip()
+        raw_id = request.form.get("file_id", "").strip()
+        try:
+            file_id = int(raw_id)
+        except ValueError:
+            flash("Invalid file id.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        row = get_uploaded_knowledge_file(file_id, database_path=config.database_path)
+        if row is None or row.project_key != project_key:
+            flash("Knowledge file not found for selected project.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        if not set_uploaded_knowledge_file_active(file_id, False, database_path=config.database_path):
+            flash("Failed to detach file.", "error")
+            return redirect(url_for("manual_actions", project_key=project_key))
+
+        deleted = delete_knowledge_source_chunks(
+            project_key=project_key,
+            source_type="file",
+            source_ref=row.stored_path,
+            database_path=config.database_path,
+        )
+        flash(f"Detached file and removed {deleted} ingested chunk(s).", "success")
+        return redirect(url_for("manual_actions", project_key=project_key))
 
     @app.post("/admin/cleanup/job-logs")
     @_require_auth
@@ -1203,6 +1426,68 @@ def _build_effective_config(config: Config, settings: RuntimeSettings) -> dict[s
         "discord_token_loaded": bool(config.discord_bot_token),
         "gemini_key_loaded": bool(config.gemini_api_key),
     }
+
+
+def _resolve_projects_for_dashboard(settings: RuntimeSettings) -> list[ProjectConfig]:
+    """Resolve projects for admin pages, preserving legacy single-project fallback."""
+
+    if settings.project_configs:
+        return settings.project_configs
+    return [
+        ProjectConfig(
+            key="default",
+            name="Default",
+            source_channel_ids=settings.source_channel_ids,
+            post_channel_id=settings.reminder_channel_id if settings.reminder_channel_id > 0 else None,
+            fallback_post_channel_id=settings.shared_post_channel_id,
+            mention_role_id=settings.designated_role_id,
+            knowledge_channel_ids=[],
+            knowledge_file_paths=[],
+        )
+    ]
+
+
+def _format_uploaded_rows_for_display(rows: list[Any]) -> list[dict[str, Any]]:
+    """Prepare uploaded knowledge metadata rows for dashboard table rendering."""
+
+    formatted: list[dict[str, Any]] = []
+    for row in rows:
+        formatted.append(
+            {
+                "id": row.id,
+                "project_key": row.project_key,
+                "original_filename": row.original_filename,
+                "stored_path": row.stored_path,
+                "file_type": row.file_type,
+                "file_size_label": _format_file_size(row.file_size_bytes),
+                "uploaded_at": row.uploaded_at,
+                "ingest_status": row.ingest_status,
+                "badge_class": _ingest_status_badge_class(row.ingest_status),
+            }
+        )
+    return formatted
+
+
+def _format_file_size(size_bytes: int) -> str:
+    value = float(size_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{int(size_bytes)} B"
+
+
+def _ingest_status_badge_class(status: str) -> str:
+    value = status.strip().lower()
+    if value in {"ingested", "success"}:
+        return "success"
+    if value in {"failed", "error"}:
+        return "failed"
+    if value in {"empty", "pending"}:
+        return "degraded"
+    return "queued"
 
 
 def _runtime_settings_from_form(form: Any) -> RuntimeSettings:

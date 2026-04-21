@@ -22,6 +22,7 @@ class Config:
     discord_bot_token: str
     gemini_api_key: str
     database_path: str
+    knowledge_upload_dir: str
     admin_password: str
     admin_session_secret: str
     seed_source_channel_ids: list[int]
@@ -69,6 +70,9 @@ def load_config() -> Config:
         discord_bot_token=values["DISCORD_BOT_TOKEN"],
         gemini_api_key=values["GEMINI_API_KEY"],
         database_path=values["DATABASE_PATH"],
+        knowledge_upload_dir=(
+            os.getenv("KNOWLEDGE_UPLOAD_DIR", "").strip() or "/data/knowledge_uploads"
+        ),
         admin_password=admin_password,
         admin_session_secret=(
             os.getenv("ADMIN_SESSION_SECRET", "").strip() or admin_password

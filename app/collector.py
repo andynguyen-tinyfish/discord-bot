@@ -75,6 +75,18 @@ def _normalize_message(message: discord.Message, channel: Any) -> dict[str, Any]
     if hasattr(message.author, "roles"):
         role_ids = [str(getattr(role, "id", "")) for role in getattr(message.author, "roles", [])]
 
+    reply_to_message_id = ""
+    reply_to_author_id = ""
+    reply_to_author_name = ""
+    reply_to_content = ""
+    if message.reference is not None and message.reference.message_id is not None:
+        reply_to_message_id = str(message.reference.message_id)
+        resolved = getattr(message.reference, "resolved", None)
+        if isinstance(resolved, discord.Message):
+            reply_to_author_id = str(getattr(resolved.author, "id", "") or "")
+            reply_to_author_name = str(getattr(resolved.author, "display_name", "") or "")
+            reply_to_content = str(getattr(resolved, "content", "") or "")
+
     return {
         "message_id": str(message.id),
         "author_id": str(message.author.id),
@@ -84,6 +96,10 @@ def _normalize_message(message: discord.Message, channel: Any) -> dict[str, Any]
         "channel_name": str(getattr(channel, "name", "")),
         "created_at": message.created_at.astimezone(timezone.utc).isoformat(),
         "content": message.content,
+        "reply_to_message_id": reply_to_message_id,
+        "reply_to_author_id": reply_to_author_id,
+        "reply_to_author_name": reply_to_author_name,
+        "reply_to_content": reply_to_content,
     }
 
 

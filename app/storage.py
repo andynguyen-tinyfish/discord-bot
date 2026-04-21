@@ -54,6 +54,24 @@ class RuntimeSettings:
     project_configs: list[ProjectConfig]
 
 
+@dataclass(frozen=True)
+class UploadedKnowledgeFile:
+    """Metadata for dashboard-uploaded knowledge files."""
+
+    id: int
+    project_key: str
+    original_filename: str
+    stored_path: str
+    file_type: str
+    file_size_bytes: int
+    uploaded_by: str | None
+    uploaded_at: str
+    is_active: bool
+    ingest_status: str
+    last_ingested_at: str | None
+    last_ingest_error: str | None
+
+
 def init_db(database_path: str | None = None, seed_settings: RuntimeSettings | None = None) -> None:
     """Create the SQLite database and required tables if they do not exist."""
 
@@ -208,6 +226,30 @@ def init_db(database_path: str | None = None, seed_settings: RuntimeSettings | N
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_source ON knowledge_chunks(source_type, source_ref)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uploaded_knowledge_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_key TEXT NOT NULL,
+                original_filename TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                file_type TEXT NOT NULL DEFAULT '',
+                file_size_bytes INTEGER NOT NULL DEFAULT 0,
+                uploaded_by TEXT,
+                uploaded_at TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                ingest_status TEXT NOT NULL DEFAULT 'pending',
+                last_ingested_at TEXT,
+                last_ingest_error TEXT
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_uploaded_knowledge_project ON uploaded_knowledge_files(project_key, is_active)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_uploaded_knowledge_path_active ON uploaded_knowledge_files(project_key, stored_path, is_active)"
         )
         connection.commit()
         runtime_settings_created = runtime_settings_insert.rowcount == 1
@@ -577,6 +619,251 @@ def get_recent_job_logs(limit: int = 200, database_path: str | None = None) -> l
     ]
 
 
+def add_uploaded_knowledge_file(
+    project_key: str,
+    original_filename: str,
+    stored_path: str,
+    file_type: str,
+    file_size_bytes: int,
+    uploaded_by: str | None = None,
+    database_path: str | None = None,
+) -> int:
+    """Insert or reactivate one uploaded project knowledge file metadata row."""
+
+    db_path = _resolve_database_path(database_path)
+    now = _utc_now_iso()
+    with sqlite3.connect(db_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT id
+            FROM uploaded_knowledge_files
+            WHERE project_key = ? AND stored_path = ? AND is_active = 1
+            """,
+            (project_key, stored_path),
+        ).fetchone()
+        if existing is not None:
+            file_id = int(existing[0])
+            connection.execute(
+                """
+                UPDATE uploaded_knowledge_files
+                SET original_filename = ?,
+                    file_type = ?,
+                    file_size_bytes = ?,
+                    uploaded_by = ?,
+                    uploaded_at = ?,
+                    ingest_status = 'pending',
+                    last_ingest_error = NULL
+                WHERE id = ?
+                """,
+                (
+                    original_filename,
+                    file_type,
+                    int(file_size_bytes),
+                    uploaded_by,
+                    now,
+                    file_id,
+                ),
+            )
+            connection.commit()
+            return file_id
+
+        cursor = connection.execute(
+            """
+            INSERT INTO uploaded_knowledge_files (
+                project_key,
+                original_filename,
+                stored_path,
+                file_type,
+                file_size_bytes,
+                uploaded_by,
+                uploaded_at,
+                is_active,
+                ingest_status,
+                last_ingested_at,
+                last_ingest_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', NULL, NULL)
+            """,
+            (
+                project_key,
+                original_filename,
+                stored_path,
+                file_type,
+                int(file_size_bytes),
+                uploaded_by,
+                now,
+            ),
+        )
+        connection.commit()
+    return int(cursor.lastrowid)
+
+
+def list_uploaded_knowledge_files(
+    project_key: str | None = None,
+    only_active: bool = True,
+    database_path: str | None = None,
+) -> list[UploadedKnowledgeFile]:
+    """List dashboard-uploaded knowledge file metadata rows."""
+
+    db_path = _resolve_database_path(database_path)
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    if project_key:
+        where_clauses.append("project_key = ?")
+        params.append(project_key)
+    if only_active:
+        where_clauses.append("is_active = 1")
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT
+                id,
+                project_key,
+                original_filename,
+                stored_path,
+                file_type,
+                file_size_bytes,
+                uploaded_by,
+                uploaded_at,
+                is_active,
+                ingest_status,
+                last_ingested_at,
+                last_ingest_error
+            FROM uploaded_knowledge_files
+            {where_sql}
+            ORDER BY uploaded_at DESC, id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+
+    return [
+        UploadedKnowledgeFile(
+            id=int(row["id"]),
+            project_key=str(row["project_key"]),
+            original_filename=str(row["original_filename"]),
+            stored_path=str(row["stored_path"]),
+            file_type=str(row["file_type"] or ""),
+            file_size_bytes=int(row["file_size_bytes"] or 0),
+            uploaded_by=str(row["uploaded_by"]) if row["uploaded_by"] else None,
+            uploaded_at=str(row["uploaded_at"]),
+            is_active=bool(row["is_active"]),
+            ingest_status=str(row["ingest_status"] or "pending"),
+            last_ingested_at=str(row["last_ingested_at"]) if row["last_ingested_at"] else None,
+            last_ingest_error=str(row["last_ingest_error"]) if row["last_ingest_error"] else None,
+        )
+        for row in rows
+    ]
+
+
+def get_uploaded_knowledge_file(file_id: int, database_path: str | None = None) -> UploadedKnowledgeFile | None:
+    """Get one uploaded file metadata row by id."""
+
+    db_path = _resolve_database_path(database_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                project_key,
+                original_filename,
+                stored_path,
+                file_type,
+                file_size_bytes,
+                uploaded_by,
+                uploaded_at,
+                is_active,
+                ingest_status,
+                last_ingested_at,
+                last_ingest_error
+            FROM uploaded_knowledge_files
+            WHERE id = ?
+            """,
+            (int(file_id),),
+        ).fetchone()
+    if row is None:
+        return None
+    return UploadedKnowledgeFile(
+        id=int(row["id"]),
+        project_key=str(row["project_key"]),
+        original_filename=str(row["original_filename"]),
+        stored_path=str(row["stored_path"]),
+        file_type=str(row["file_type"] or ""),
+        file_size_bytes=int(row["file_size_bytes"] or 0),
+        uploaded_by=str(row["uploaded_by"]) if row["uploaded_by"] else None,
+        uploaded_at=str(row["uploaded_at"]),
+        is_active=bool(row["is_active"]),
+        ingest_status=str(row["ingest_status"] or "pending"),
+        last_ingested_at=str(row["last_ingested_at"]) if row["last_ingested_at"] else None,
+        last_ingest_error=str(row["last_ingest_error"]) if row["last_ingest_error"] else None,
+    )
+
+
+def get_project_uploaded_knowledge_paths(
+    project_key: str,
+    database_path: str | None = None,
+) -> list[str]:
+    """Return active uploaded file paths for one project."""
+
+    rows = list_uploaded_knowledge_files(
+        project_key=project_key,
+        only_active=True,
+        database_path=database_path,
+    )
+    return [row.stored_path for row in rows if row.stored_path.strip()]
+
+
+def set_uploaded_knowledge_file_active(
+    file_id: int,
+    is_active: bool,
+    database_path: str | None = None,
+) -> bool:
+    """Activate/deactivate one uploaded file metadata row."""
+
+    db_path = _resolve_database_path(database_path)
+    with sqlite3.connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE uploaded_knowledge_files
+            SET is_active = ?
+            WHERE id = ?
+            """,
+            (1 if is_active else 0, int(file_id)),
+        )
+        connection.commit()
+    return cursor.rowcount == 1
+
+
+def mark_uploaded_knowledge_file_ingest_result(
+    file_ids: list[int],
+    status: str,
+    error_message: str | None,
+    database_path: str | None = None,
+) -> None:
+    """Store ingestion status for one or many uploaded files."""
+
+    deduped_ids = sorted({int(file_id) for file_id in file_ids if int(file_id) > 0})
+    if not deduped_ids:
+        return
+    db_path = _resolve_database_path(database_path)
+    now = _utc_now_iso()
+    with sqlite3.connect(db_path) as connection:
+        connection.executemany(
+            """
+            UPDATE uploaded_knowledge_files
+            SET ingest_status = ?,
+                last_ingested_at = ?,
+                last_ingest_error = ?
+            WHERE id = ?
+            """,
+            [(status, now, error_message, file_id) for file_id in deduped_ids],
+        )
+        connection.commit()
+
+
 def replace_knowledge_source_chunks(
     project_key: str,
     project_name: str,
@@ -636,6 +923,27 @@ def replace_knowledge_source_chunks(
             inserted += 1
         connection.commit()
     return inserted
+
+
+def delete_knowledge_source_chunks(
+    project_key: str,
+    source_type: str,
+    source_ref: str,
+    database_path: str | None = None,
+) -> int:
+    """Delete stored chunks for one knowledge source."""
+
+    db_path = _resolve_database_path(database_path)
+    with sqlite3.connect(db_path) as connection:
+        cursor = connection.execute(
+            """
+            DELETE FROM knowledge_chunks
+            WHERE project_key = ? AND source_type = ? AND source_ref = ?
+            """,
+            (project_key, source_type, source_ref),
+        )
+        connection.commit()
+    return int(cursor.rowcount)
 
 
 def search_knowledge_chunks(

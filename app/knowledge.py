@@ -14,6 +14,9 @@ import discord
 from app.storage import (
     ProjectConfig,
     RuntimeSettings,
+    get_project_uploaded_knowledge_paths,
+    list_uploaded_knowledge_files,
+    mark_uploaded_knowledge_file_ingest_result,
     replace_knowledge_source_chunks,
     search_knowledge_chunks,
 )
@@ -36,7 +39,19 @@ async def ingest_project_knowledge(
 
     counts = {"sources": 0, "chunks": 0}
     channel_ids = _unique_ints(project.knowledge_channel_ids + settings.shared_knowledge_channel_ids)
-    file_paths = _unique_strings(project.knowledge_file_paths + settings.shared_knowledge_file_paths)
+    uploaded_paths = get_project_uploaded_knowledge_paths(project.key, database_path=database_path)
+    uploaded_rows = list_uploaded_knowledge_files(
+        project_key=project.key,
+        only_active=True,
+        database_path=database_path,
+    )
+    uploaded_ids_by_path: dict[str, list[int]] = {}
+    for row in uploaded_rows:
+        uploaded_ids_by_path.setdefault(row.stored_path, []).append(row.id)
+
+    file_paths = _unique_strings(
+        project.knowledge_file_paths + settings.shared_knowledge_file_paths + uploaded_paths
+    )
 
     for channel_id in channel_ids:
         channel_name, text = await _read_channel_history(client, channel_id, channel_history_limit)
@@ -56,7 +71,7 @@ async def ingest_project_knowledge(
 
     for raw_path in file_paths:
         file_path = Path(raw_path).expanduser()
-        text = _read_file_text(file_path)
+        text, read_error = _read_file_text(file_path)
         chunks = chunk_text(text)
         inserted = replace_knowledge_source_chunks(
             project_key=project.key,
@@ -70,6 +85,29 @@ async def ingest_project_knowledge(
         )
         counts["sources"] += 1
         counts["chunks"] += inserted
+        uploaded_ids = uploaded_ids_by_path.get(str(file_path), [])
+        if uploaded_ids:
+            if read_error:
+                mark_uploaded_knowledge_file_ingest_result(
+                    uploaded_ids,
+                    status="failed",
+                    error_message=read_error,
+                    database_path=database_path,
+                )
+            elif inserted == 0:
+                mark_uploaded_knowledge_file_ingest_result(
+                    uploaded_ids,
+                    status="empty",
+                    error_message=None,
+                    database_path=database_path,
+                )
+            else:
+                mark_uploaded_knowledge_file_ingest_result(
+                    uploaded_ids,
+                    status="ingested",
+                    error_message=None,
+                    database_path=database_path,
+                )
 
     return counts
 
@@ -162,19 +200,22 @@ async def _read_channel_history(
     return str(getattr(channel, "name", channel_id)), "\n".join(rows)
 
 
-def _read_file_text(path: Path) -> str:
+def _read_file_text(path: Path) -> tuple[str, str | None]:
     """Read text from markdown/txt/pdf files."""
 
     if not path.exists():
         LOGGER.warning("Knowledge file not found: %s", path)
-        return ""
+        return "", "file_not_found"
     suffix = path.suffix.lower()
     if suffix in {".md", ".txt"}:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return path.read_text(encoding="utf-8", errors="ignore"), None
     if suffix == ".pdf":
-        return _extract_pdf_text(path)
+        extracted = _extract_pdf_text(path)
+        if not extracted.strip():
+            return "", "pdf_extract_empty"
+        return extracted, None
     LOGGER.warning("Unsupported knowledge file type: %s", path)
-    return ""
+    return "", "unsupported_file_type"
 
 
 def _extract_pdf_text(path: Path) -> str:
@@ -216,4 +257,3 @@ def _unique_strings(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
-

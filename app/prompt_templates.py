@@ -51,6 +51,8 @@ Content rules:
 - Treat Q&A as important signal.
 - Resolved Q&A decisions -> "highlights".
 - Unresolved questions needing clarification -> "follow_ups".
+- Previous unresolved follow-ups from yesterday are provided in context; if they are answered today, do not repeat them in "follow_ups".
+- If a previous follow-up is partially answered but still needs action, keep it in "follow_ups" with updated wording.
 - Real blockers/risks that stop work -> "blockers".
 - Only include blockers when clearly present.
 - Do not repeat the same point across sections.

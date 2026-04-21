@@ -24,6 +24,7 @@ Secrets stay in environment variables:
 - `DISCORD_BOT_TOKEN`
 - `GEMINI_API_KEY`
 - `DATABASE_PATH`
+- `KNOWLEDGE_UPLOAD_DIR` (default: `/data/knowledge_uploads`)
 - `ADMIN_PASSWORD` (or `ADMIN_AUTH_SECRET`)
 
 Notes:
@@ -34,6 +35,7 @@ Operational settings are stored in SQLite (`runtime_settings` table) and can be 
 - source/reminder channel IDs
 - per-project channel routing JSON
 - per-project knowledge source JSON (channels/files)
+- dashboard-uploaded project knowledge files (stored on persistent volume)
 - timezone
 - nightly/morning schedule
 - dry-run and dry-run channel
@@ -81,6 +83,8 @@ Notes:
 - `mention_role_id` is optional and prepends a role ping before that project message.
 - `knowledge_channel_ids` are project-specific guideline/reference channels for ingestion.
 - `knowledge_file_paths` are local docs (`.md`, `.txt`, `.pdf`) for ingestion.
+- Admin dashboard also supports per-project file upload; uploaded files are stored under `KNOWLEDGE_UPLOAD_DIR/<project_key>/...` and auto-included during ingestion.
+- For Railway, use persistent container paths (for example `/data/...` and `/app/guidelines/...`), not local Mac paths.
 - `Designated Role ID` in dashboard is a global fallback ping if a project does not define `mention_role_id`.
 - `Shared Knowledge Channel IDs` and `Shared Knowledge File Paths` in dashboard are common sources ingested for every project.
 - Global fallback order for posting is:

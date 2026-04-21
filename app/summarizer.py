@@ -30,6 +30,7 @@ def summarize_messages(
     api_key: str | None = None,
     model: str = GEMINI_MODEL,
     project_name: str | None = None,
+    previous_follow_ups: list[str] | None = None,
 ) -> dict[str, Any]:
     """Summarize filtered messages and return a validated summary object."""
 
@@ -38,6 +39,7 @@ def summarize_messages(
         api_key=api_key,
         model=model,
         project_name=project_name,
+        previous_follow_ups=previous_follow_ups,
     )
     return summary
 
@@ -47,11 +49,14 @@ def summarize_messages_with_meta(
     api_key: str | None = None,
     model: str = GEMINI_MODEL,
     project_name: str | None = None,
+    previous_follow_ups: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Summarize messages and return both summary and execution metadata."""
 
+    previous_items = [item.strip() for item in (previous_follow_ups or []) if str(item).strip()]
+
     if not messages:
-        return _fallback_summary(), {
+        return _fallback_summary(messages, previous_follow_ups=previous_items), {
             "llm_attempted": False,
             "llm_success": False,
             "used_fallback": True,
@@ -61,7 +66,12 @@ def summarize_messages_with_meta(
         }
 
     resolved_api_key = api_key or load_config().gemini_api_key
-    payload = _build_request_payload(messages, model, project_name=project_name)
+    payload = _build_request_payload(
+        messages,
+        model,
+        project_name=project_name,
+        previous_follow_ups=previous_items,
+    )
 
     try:
         raw_content = _call_llm_api(payload, resolved_api_key, model)
@@ -78,7 +88,7 @@ def summarize_messages_with_meta(
     except (ValueError, error.URLError, error.HTTPError, json.JSONDecodeError) as exc:
         reason = _build_error_reason(exc)
         LOGGER.warning("Gemini summarization failed (%s)", reason)
-        return _fallback_summary(messages), {
+        return _fallback_summary(messages, previous_follow_ups=previous_items), {
             "llm_attempted": True,
             "llm_success": False,
             "used_fallback": True,
@@ -92,6 +102,7 @@ def _build_request_payload(
     messages: list[dict[str, Any]],
     model: str,
     project_name: str | None = None,
+    previous_follow_ups: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the Gemini API request payload."""
 
@@ -101,7 +112,15 @@ def _build_request_payload(
         },
         "contents": [
             {
-                "parts": [{"text": _format_messages_for_prompt(messages, project_name=project_name)}],
+                "parts": [
+                    {
+                        "text": _format_messages_for_prompt(
+                            messages,
+                            project_name=project_name,
+                            previous_follow_ups=previous_follow_ups,
+                        )
+                    }
+                ],
             }
         ],
         "generationConfig": {
@@ -111,19 +130,50 @@ def _build_request_payload(
     }
 
 
-def _format_messages_for_prompt(messages: list[dict[str, Any]], project_name: str | None = None) -> str:
+def _format_messages_for_prompt(
+    messages: list[dict[str, Any]],
+    project_name: str | None = None,
+    previous_follow_ups: list[str] | None = None,
+) -> str:
     """Format normalized messages into a compact prompt input block."""
 
     project = (project_name or "this project").strip()
     lines = [
         f"Project name: {project}",
-        "Summarize these QA messages into practical internal reminders for this project:",
+        "Previous unresolved follow-ups from prior day:",
     ]
+    prior_items = [item for item in (previous_follow_ups or []) if item.strip()]
+    if prior_items:
+        lines.extend([f"- {item}" for item in prior_items])
+    else:
+        lines.append("- (none)")
+
+    lines.append("Current-day QA messages (keep reply/reference context):")
     for message in messages:
+        message_id = str(message.get("message_id", ""))
         author_name = str(message.get("author_name", "Unknown"))
         created_at = str(message.get("created_at", ""))
+        channel_name = str(message.get("channel_name", ""))
         content = str(message.get("content", "")).strip()
-        lines.append(f"- [{created_at}] {author_name}: {content}")
+        reply_to = str(message.get("reply_to_message_id", "")).strip()
+        reply_author = str(message.get("reply_to_author_name", "")).strip()
+        reply_content = str(message.get("reply_to_content", "")).strip()
+
+        relation = ""
+        if reply_to:
+            relation = f" reply_to={reply_to}"
+            if reply_author:
+                relation += f" ({reply_author})"
+        lines.append(
+            f"- [id={message_id}{relation}] [{created_at}] #{channel_name} {author_name}: {content}"
+        )
+        if reply_to and reply_content:
+            lines.append(f"  referenced: {reply_content}")
+
+    lines.append(
+        "Instruction: Decide which previous follow-ups are now resolved vs still open based on today's messages. "
+        "Return only still-open items in follow_ups."
+    )
     return "\n".join(lines)
 
 
@@ -222,30 +272,36 @@ def _validate_final_message(value: Any) -> str:
     return value.strip()
 
 
-def _fallback_summary(messages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def _fallback_summary(
+    messages: list[dict[str, Any]] | None = None,
+    previous_follow_ups: list[str] | None = None,
+) -> dict[str, Any]:
     """Return a safe fallback summary when summarization fails."""
+
+    previous_items = _dedupe_items([item.strip() for item in (previous_follow_ups or []) if item.strip()])
 
     if not messages:
         return {
             "highlights": [],
             "blockers": [],
-            "follow_ups": [],
+            "follow_ups": previous_items,
             "final_message": "No significant QA updates for this period.",
         }
 
     if len(messages) <= 3:
         highlights = _build_low_signal_highlights(messages)
+        follow_ups = previous_items or ["Continue monitoring and log concrete blockers when they appear."]
         return {
             "highlights": highlights,
             "blockers": [],
-            "follow_ups": ["Continue monitoring and log concrete blockers when they appear."],
+            "follow_ups": follow_ups[:MAX_FOLLOW_UPS],
             "final_message": "Limited meaningful QA signal; no confirmed blockers from available messages.",
         }
 
     return {
         "highlights": [],
         "blockers": [],
-        "follow_ups": [],
+        "follow_ups": previous_items[:MAX_FOLLOW_UPS],
         "final_message": "Unable to generate an automatic summary. Please review the source messages.",
     }
 

@@ -181,13 +181,48 @@ async def run_nightly_job(
                 database_path=config.database_path,
             )
 
+            previous_follow_ups = _load_previous_unresolved_follow_ups(
+                target_date=resolved_date,
+                project_key=project.key,
+                database_path=config.database_path,
+            )
+            LOGGER.info(
+                "[%s][followup-debug] previous unresolved loaded: %s",
+                project.key,
+                previous_follow_ups,
+            )
+            LOGGER.info(
+                "[%s][followup-debug] current-day filtered messages: %s",
+                project.key,
+                [
+                    {
+                        "id": str(item.get("message_id", "")),
+                        "author": str(item.get("author_name", "")),
+                        "reply_to": str(item.get("reply_to_message_id", "")),
+                        "content": str(item.get("content", ""))[:120],
+                    }
+                    for item in filtered_messages[:30]
+                ],
+            )
+
             summary, summarize_meta = await asyncio.to_thread(
                 summarize_messages_with_meta,
                 filtered_messages,
                 config.gemini_api_key,
                 "gemini-2.5-flash",
                 project.name,
+                previous_follow_ups,
             )
+
+            reconciliation = _reconcile_cross_day_follow_ups(
+                previous_follow_ups=previous_follow_ups,
+                current_summary=summary,
+                current_messages=filtered_messages,
+                allowed_role_ids=settings.allowed_role_ids,
+                project_key=project.key,
+            )
+            summary["follow_ups"] = reconciliation["open_follow_ups"]
+
             summary["_meta"] = {
                 "project_key": project.key,
                 "project_name": project.name,
@@ -199,6 +234,10 @@ async def run_nightly_job(
                 "input_messages": int(summarize_meta.get("input_messages", 0)),
                 "collected_messages": len(messages),
                 "filtered_messages": len(filtered_messages),
+                "previous_follow_ups": previous_follow_ups,
+                "resolved_follow_ups": reconciliation["resolved_follow_ups"],
+                "open_follow_ups_after_reconciliation": reconciliation["open_follow_ups"],
+                "follow_up_candidates": reconciliation["candidates"],
             }
             summary["_meta"]["item_mentions"] = _build_item_mentions(summary, filtered_messages)
             if not filtered_messages:
@@ -622,6 +661,193 @@ def _match_owner_mention(item: str, messages: list[dict[str, object]]) -> str:
 def _tokenize(text: str) -> set[str]:
     tokens = {token for token in re.findall(r"[a-zA-Z0-9]{3,}", text.lower())}
     return tokens
+
+
+def _load_previous_unresolved_follow_ups(
+    target_date: date,
+    project_key: str,
+    database_path: str,
+) -> list[str]:
+    """Load unresolved follow-ups from the previous day's summary."""
+
+    previous_date = (target_date - timedelta(days=1)).isoformat()
+    previous_summary = get_summary(previous_date, database_path, project_key=project_key)
+    if not previous_summary:
+        return []
+    return [
+        item.strip()
+        for item in previous_summary.get("follow_ups", [])
+        if isinstance(item, str) and item.strip()
+    ]
+
+
+def _reconcile_cross_day_follow_ups(
+    previous_follow_ups: list[str],
+    current_summary: dict[str, object],
+    current_messages: list[dict[str, object]],
+    allowed_role_ids: list[int],
+    project_key: str,
+) -> dict[str, list[object]]:
+    """Carry unresolved follow-ups forward and close ones answered today."""
+
+    llm_follow_ups = [
+        item.strip()
+        for item in current_summary.get("follow_ups", [])
+        if isinstance(item, str) and item.strip()
+    ]
+
+    open_follow_ups: list[str] = list(llm_follow_ups)
+    resolved_follow_ups: list[str] = []
+    candidates_log: list[dict[str, object]] = []
+
+    for previous_item in previous_follow_ups:
+        if _contains_similar_follow_up(llm_follow_ups, previous_item):
+            candidates_log.append({
+                "follow_up": previous_item,
+                "status": "still_open_llm",
+                "candidates": [],
+            })
+            continue
+
+        resolved, candidates = _rule_based_follow_up_closure(
+            follow_up_text=previous_item,
+            messages=current_messages,
+            allowed_role_ids=allowed_role_ids,
+        )
+        candidates_log.append({
+            "follow_up": previous_item,
+            "status": "resolved" if resolved else "open",
+            "candidates": candidates,
+        })
+
+        if resolved:
+            resolved_follow_ups.append(previous_item)
+        else:
+            open_follow_ups.append(previous_item)
+
+    deduped_open = _dedupe_preserve_order(open_follow_ups)
+    deduped_resolved = _dedupe_preserve_order(resolved_follow_ups)
+
+    LOGGER.info("[%s][followup-debug] answer candidates evaluated: %s", project_key, candidates_log)
+    LOGGER.info("[%s][followup-debug] resolved follow-ups: %s", project_key, deduped_resolved)
+    LOGGER.info("[%s][followup-debug] still-open follow-ups: %s", project_key, deduped_open)
+
+    return {
+        "open_follow_ups": deduped_open,
+        "resolved_follow_ups": deduped_resolved,
+        "candidates": candidates_log,
+    }
+
+
+def _rule_based_follow_up_closure(
+    follow_up_text: str,
+    messages: list[dict[str, object]],
+    allowed_role_ids: list[int],
+) -> tuple[bool, list[dict[str, str]]]:
+    """Heuristic closure detection for fallback/degraded paths."""
+
+    follow_tokens = _tokenize(follow_up_text)
+    if not follow_tokens:
+        return False, []
+
+    candidates: list[dict[str, str]] = []
+    role_id_set = {str(item) for item in allowed_role_ids}
+
+    for message in messages:
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        message_tokens = _tokenize(content)
+        overlap = len(follow_tokens & message_tokens)
+        reply_to = str(message.get("reply_to_message_id", "")).strip()
+        if overlap < 2 and not (reply_to and overlap >= 1):
+            continue
+
+        author_roles = {
+            str(role_id)
+            for role_id in message.get("author_role_ids", [])
+            if str(role_id).strip()
+        }
+        author_name = str(message.get("author_name", "")).lower()
+        content_lower = content.lower()
+
+        answerish = (
+            "?" not in content_lower
+            and any(
+                marker in content_lower
+                for marker in (
+                    "should",
+                    "please",
+                    "use ",
+                    "mark as",
+                    "choose",
+                    "resolved",
+                    "confirmed",
+                    "for this case",
+                    "answer",
+                    "clarif",
+                )
+            )
+        )
+        lead_like = bool(author_roles & role_id_set) or any(
+            token in author_name for token in ("lead", "mod", "admin", "review", "qa")
+        )
+
+        candidates.append(
+            {
+                "message_id": str(message.get("message_id", "")),
+                "author": str(message.get("author_name", "")),
+                "reply_to": reply_to,
+                "overlap": str(overlap),
+                "answerish": str(answerish),
+                "lead_like": str(lead_like),
+                "content": content[:160],
+            }
+        )
+
+        if answerish and (lead_like or reply_to):
+            return True, candidates
+
+    return False, candidates
+
+
+def _contains_similar_follow_up(items: list[str], target: str) -> bool:
+    """Return True when target appears semantically in the list."""
+
+    target_key = _canonicalize_follow_up(target)
+    if not target_key:
+        return False
+    for item in items:
+        item_key = _canonicalize_follow_up(item)
+        if not item_key:
+            continue
+        if target_key == item_key:
+            return True
+        if target_key in item_key or item_key in target_key:
+            return True
+    return False
+
+
+def _canonicalize_follow_up(text: str) -> str:
+    """Build a lightweight comparable key for follow-up text."""
+
+    normalized = re.sub(r"[^a-z0-9\s]", " ", text.lower())
+    tokens = [token for token in normalized.split() if len(token) >= 3]
+    return " ".join(tokens)
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    """Dedupe string list while preserving first appearance."""
+
+    seen: set[str] = set()
+    output: list[str] = []
+    for item in items:
+        key = _canonicalize_follow_up(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
 
 
 def _validate_time_part(name: str, value: int, minimum: int, maximum: int) -> None:
